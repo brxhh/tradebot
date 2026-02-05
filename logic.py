@@ -25,18 +25,32 @@ def get_period_for_timeframe(timeframe):
 
 def get_news_sentiment(symbol):
     try:
-        # Убираем лишнее из тикера для поиска
-        search_term = symbol.split('=')[0]
-        query = f"{search_term} market news"
-        results = DDGS().text(keywords=query, region='wt-wt', safesearch='off', timelimit='d', max_results=3)
+        ticker = yf.Ticker(symbol)
+        news_list = ticker.news
 
-        news_summary = ""
-        if results:
-            for res in results:
-                news_summary += f"- {res['title']}\n"
-        return news_summary if news_summary else "Значимых новостей нет."
-    except Exception:
-        return "Ошибка загрузки новостей."
+        if not news_list:
+            return "Новостей по этому активу не найдено."
+
+        summary = ""
+        for item in news_list[:8]:
+            content = item.get('content', {})
+
+            title = content.get('title')
+            if not title:
+                title = item.get('title', 'Без заголовка')
+
+            provider_data = content.get('provider', {})
+            publisher = provider_data.get('displayName')
+
+            if not publisher:
+                publisher = item.get('publisher', 'Yahoo Finance')
+
+            summary += f"- [{publisher}] {title}\n"
+
+        return summary if summary else "Значимых новостей нет."
+
+    except Exception as e:
+        return f"Ошибка загрузки новостей: {e}"
 
 
 def get_market_data(ticker, timeframe):
@@ -94,11 +108,16 @@ async def get_ai_analysis(symbol_name, symbol_data, dxy_data, user_text, timefra
     news_text = await asyncio.to_thread(get_news_sentiment, symbol_name)
 
     system_prompt = """
-    Ты — строгий риск-менеджер хедж-фонда. 
-    Твоя задача — не просто угадать направление, а дать грамотный совет по управлению позицией.
+    Ты — профессиональный финансовый аналитик и риск-менеджер.
+    Твоя специализация: Акции, Форекс, Золото и Криптовалюты.
+
+    ТВОИ ЗАДАЧИ:
+        1. Проанализируй технические данные.
+        2. Прочитай заголовки новостей (они могут быть на английском) и учти их влияние.
+        3. Дай строгий вердикт на РУССКОМ языке.
 
     ПРАВИЛА:
-    1. Будь краток.
+    1. Будь краток и конкретен.
     2. Используй HTML теги: <b>жирный</b>, <code>код</code>, <i>курсив</i>.
     3. НИКАКОГО Markdown (** или ##).
     4. Всегда рассчитывай Стоп-Лосс (2 * ATR).
@@ -114,9 +133,11 @@ async def get_ai_analysis(symbol_name, symbol_data, dxy_data, user_text, timefra
     • Bollinger: {symbol_data['bb_status']}
     • Поддержка/Сопр: {symbol_data['support']} / {symbol_data['resistance']}
 
-    НОВОСТИ: {news_text}
-    DXY (Индекс доллара): {dxy_data['price']}
-    Мысли трейдера: "{user_text}"
+        📰 НОВОСТНОЙ ФОН (Yahoo Finance):
+        {news_text}
+
+        ИНДЕКС ДОЛЛАРА (DXY): {dxy_data['price']}
+        МЫСЛИ ТРЕЙДЕРА: "{user_text}"
 
     ЗАДАЧА:
     Дай прогноз, рассчитай стоп-лосс и дай совет по психологии/риску.
