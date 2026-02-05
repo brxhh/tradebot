@@ -5,3 +5,4 @@ ta
 pandas
 google-generativeai
 openai
+aiohttp

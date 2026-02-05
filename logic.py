@@ -9,7 +9,6 @@ from duckduckgo_search import DDGS
 
 warnings.filterwarnings("ignore")
 
-
 client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=config.GROQ_API_KEY
@@ -26,15 +25,18 @@ def get_period_for_timeframe(timeframe):
 
 def get_news_sentiment(symbol):
     try:
-        query = f"{symbol} news"
+        # Убираем лишнее из тикера для поиска
+        search_term = symbol.split('=')[0]
+        query = f"{search_term} market news"
         results = DDGS().text(keywords=query, region='wt-wt', safesearch='off', timelimit='d', max_results=3)
+
         news_summary = ""
         if results:
             for res in results:
                 news_summary += f"- {res['title']}\n"
-        return news_summary if news_summary else "Новостей нет."
+        return news_summary if news_summary else "Значимых новостей нет."
     except Exception:
-        return "Не удалось загрузить новости."
+        return "Ошибка загрузки новостей."
 
 
 def get_market_data(ticker, timeframe):
@@ -53,7 +55,7 @@ def get_market_data(ticker, timeframe):
             trend_val = ta.trend.sma_indicator(close, window=200).iloc[-1]
             trend_str = "UP 🟢" if close.iloc[-1] > trend_val else "DOWN 🔴"
         else:
-            trend_str = "НЕТ ДАННЫХ"
+            trend_str = "Н/Д"
 
         rsi = ta.momentum.rsi(close, window=14)
         bb = ta.volatility.BollingerBands(close, window=20)
@@ -81,33 +83,52 @@ def get_market_data(ticker, timeframe):
         return None
 
 
+def clean_ai_response(text):
+    text = text.replace("**", "")
+    text = text.replace("###", "")
+    text = text.replace("```html", "").replace("```", "")
+    return text.strip()
+
+
 async def get_ai_analysis(symbol_name, symbol_data, dxy_data, user_text, timeframe):
     news_text = await asyncio.to_thread(get_news_sentiment, symbol_name)
 
     system_prompt = """
-        Ты — строгий риск-менеджер хедж-фонда. Твоя цель — защита капитала.
+    Ты — строгий риск-менеджер хедж-фонда. 
+    Твоя задача — не просто угадать направление, а дать грамотный совет по управлению позицией.
 
-        ПРАВИЛА:
-        1. Будь краток. Без воды.
-        2. Используй только HTML теги: <b>жирный</b>, <code>код</code>, <i>курсив</i>.
-        3. НИКАКОГО Markdown (символов ** или ##).
-        4. Если Техника противоречит Новостям — рекомендуй [ЖДАТЬ].
-        5. Всегда рассчитывай Стоп-Лосс.
-        """
+    ПРАВИЛА:
+    1. Будь краток.
+    2. Используй HTML теги: <b>жирный</b>, <code>код</code>, <i>курсив</i>.
+    3. НИКАКОГО Markdown (** или ##).
+    4. Всегда рассчитывай Стоп-Лосс (2 * ATR).
+    """
 
     user_prompt = f"""
     АКТИВ: {symbol_name} ({timeframe}) | Цена: {symbol_data['price']}
-    Техника: RSI {symbol_data['rsi']}, Тренд {symbol_data['trend']}, ATR {symbol_data['atr']}
-    Боллинджер: {symbol_data['bb_status']}
-    Новости: {news_text}
-    Индекс доллара: {dxy_data['price']}
-    Вопрос: "{user_text}"
 
-    Дай сигнал с учетом ATR для стоп-лосса.
-    Формат:
+    ТЕХНИКА: 
+    • RSI: {symbol_data['rsi']} (Если >70 перекуплен, <30 перепродан)
+    • Тренд: {symbol_data['trend']}
+    • ATR: {symbol_data['atr']}
+    • Bollinger: {symbol_data['bb_status']}
+    • Поддержка/Сопр: {symbol_data['support']} / {symbol_data['resistance']}
+
+    НОВОСТИ: {news_text}
+    DXY (Индекс доллара): {dxy_data['price']}
+    Мысли трейдера: "{user_text}"
+
+    ЗАДАЧА:
+    Дай прогноз, рассчитай стоп-лосс и дай совет по психологии/риску.
+
+    ФОРМАТ ОТВЕТА (СТРОГО):
     <b>🗞 ФОН:</b> ...
+
     <b>⚙️ ТЕХНИКА:</b> ...
-    <b>🎯 ВЕРДИКТ:</b> [ЛОНГ]/[ШОРТ]/[ЖДАТЬ]
+
+    <b>🧠 СОВЕТ:</b> (Оцени риск/прибыль, стоит ли ждать подтверждения, психология момента)
+
+    <b>🎯 ВЕРДИКТ:</b> [ЛОНГ]/[ШОРТ]/[ЖДАТЬ] (Стоп-лосс: <code>Цена</code>)
     """
 
     try:
@@ -120,6 +141,6 @@ async def get_ai_analysis(symbol_name, symbol_data, dxy_data, user_text, timefra
             ],
             temperature=0.3
         )
-        return response.choices[0].message.content
+        return clean_ai_response(response.choices[0].message.content)
     except Exception as e:
         return f"⚠️ Ошибка Groq: {e}"
