@@ -41,7 +41,7 @@ def get_market_data(ticker, timeframe):
         rsi_val = round(last_rsi, 2) if not pd.isna(last_rsi) else 50.0
 
         return {
-            "price": round(last_price, 2),
+            "price": round(last_price, 4),
             "rsi": rsi_val,
             "trend": trend
         }
