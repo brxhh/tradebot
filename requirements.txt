@@ -4,3 +4,4 @@ yfinance
 ta
 pandas
 google-generativeai
+openai
