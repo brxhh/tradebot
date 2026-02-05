@@ -1,88 +1,125 @@
 import yfinance as yf
 import ta
 import pandas as pd
-import google.generativeai as genai
+from openai import OpenAI
 import asyncio
 import config
-import re
+import warnings
+from duckduckgo_search import DDGS
 
-genai.configure(api_key=config.GOOGLE_API_KEY)
-model = genai.GenerativeModel('gemini-flash-latest')
+warnings.filterwarnings("ignore")
+
+
+client = OpenAI(
+    base_url="https://api.groq.com/openai/v1",
+    api_key=config.GROQ_API_KEY
+)
+
+
+def get_period_for_timeframe(timeframe):
+    tf_map = {
+        '15m': '1mo', '30m': '1mo',
+        '1h': '1y', '4h': '2y', '1d': '5y', '1wk': '5y', '1mo': 'max'
+    }
+    return tf_map.get(timeframe, '1mo')
+
+
+def get_news_sentiment(symbol):
+    try:
+        query = f"{symbol} news"
+        results = DDGS().text(keywords=query, region='wt-wt', safesearch='off', timelimit='d', max_results=3)
+        news_summary = ""
+        if results:
+            for res in results:
+                news_summary += f"- {res['title']}\n"
+        return news_summary if news_summary else "Новостей нет."
+    except Exception:
+        return "Не удалось загрузить новости."
 
 
 def get_market_data(ticker, timeframe):
     try:
-        df = yf.download(ticker, period="1mo", interval=timeframe, progress=False)
-        if df.empty: return None
+        period = get_period_for_timeframe(timeframe)
+        df = yf.download(ticker, period=period, interval=timeframe, progress=False, multi_level_index=False)
 
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+        if df.empty or len(df) < 50: return None
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
 
-        close_series = df['Close']
-        if isinstance(close_series, pd.DataFrame):
-            close_series = close_series.iloc[:, 0]
+        close = df['Close']
+        high = df['High']
+        low = df['Low']
 
-        if len(close_series) < 200:
-            df['SMA_200'] = pd.Series([None] * len(close_series))
+        if len(close) >= 200:
+            trend_val = ta.trend.sma_indicator(close, window=200).iloc[-1]
+            trend_str = "UP 🟢" if close.iloc[-1] > trend_val else "DOWN 🔴"
         else:
-            df['SMA_200'] = ta.trend.sma_indicator(close_series, window=200)
+            trend_str = "НЕТ ДАННЫХ"
 
-        df['RSI'] = ta.momentum.rsi(close_series, window=14)
+        rsi = ta.momentum.rsi(close, window=14)
+        bb = ta.volatility.BollingerBands(close, window=20)
+        atr = ta.volatility.average_true_range(high, low, close, window=14)
 
-        last_price = close_series.iloc[-1]
-        last_rsi = df['RSI'].iloc[-1]
-        last_sma = df['SMA_200'].iloc[-1]
+        last_price = close.iloc[-1]
 
-        if pd.isna(last_sma):
-            trend = "НЕТ ДАННЫХ ⚪"
+        if last_price >= bb.bollinger_hband().iloc[-1]:
+            bb_status = "⚠️ ПЕРЕКУПЛЕН"
+        elif last_price <= bb.bollinger_lband().iloc[-1]:
+            bb_status = "⚠️ ПЕРЕПРОДАН"
         else:
-            trend = "UP 🟢" if last_price > last_sma else "DOWN 🔴"
-
-        rsi_val = round(last_rsi, 2) if not pd.isna(last_rsi) else 50.0
+            bb_status = "Норма"
 
         return {
-            "price": round(last_price, 4),
-            "rsi": rsi_val,
-            "trend": trend
+            "price": round(float(last_price), 4),
+            "rsi": round(rsi.iloc[-1], 2),
+            "trend": trend_str,
+            "bb_status": bb_status,
+            "support": round(close.tail(50).min(), 4),
+            "resistance": round(close.tail(50).max(), 4),
+            "atr": round(atr.iloc[-1], 4)
         }
-    except Exception as e:
-        print(f"Error {ticker}: {e}")
+    except Exception:
         return None
 
 
 async def get_ai_analysis(symbol_name, symbol_data, dxy_data, user_text, timeframe):
-    prompt = f"""
-    Ты бот-аналитик.
+    news_text = await asyncio.to_thread(get_news_sentiment, symbol_name)
 
-    АКТИВ: {symbol_name} (Таймфрейм: {timeframe})
-    Цена: {symbol_data['price']}, RSI: {symbol_data['rsi']}, Тренд: {symbol_data['trend']}
+    system_prompt = """
+        Ты — строгий риск-менеджер хедж-фонда. Твоя цель — защита капитала.
 
-    ИНДЕКС ДОЛЛАРА (DXY): {dxy_data['price']}, Тренд: {dxy_data['trend']}
+        ПРАВИЛА:
+        1. Будь краток. Без воды.
+        2. Используй только HTML теги: <b>жирный</b>, <code>код</code>, <i>курсив</i>.
+        3. НИКАКОГО Markdown (символов ** или ##).
+        4. Если Техника противоречит Новостям — рекомендуй [ЖДАТЬ].
+        5. Всегда рассчитывай Стоп-Лосс.
+        """
 
-    СОСТОЯНИЕ ТРЕЙДЕРА: "{user_text}"
+    user_prompt = f"""
+    АКТИВ: {symbol_name} ({timeframe}) | Цена: {symbol_data['price']}
+    Техника: RSI {symbol_data['rsi']}, Тренд {symbol_data['trend']}, ATR {symbol_data['atr']}
+    Боллинджер: {symbol_data['bb_status']}
+    Новости: {news_text}
+    Индекс доллара: {dxy_data['price']}
+    Вопрос: "{user_text}"
 
-    ИНСТРУКЦИЯ (HTML):
-    1. ИСПОЛЬЗУЙ ТОЛЬКО ТЕГИ: <b>жирный</b>, <i>курсив</i>, <code>код</code>.
-    2. ЗАПРЕЩЕНО: <p>, markdown.
-    3. Отвечай сжато.
-
-    СТРУКТУРА:
-    <b>📊 АНАЛИЗ {timeframe}:</b>
-    (Техника + DXY).
-
-    <b>🧠 ПСИХОЛОГИЯ:</b>
-    (Совет).
-
-    <b>ВЕРДИКТ:</b> <b>[ЛОНГ]</b> / <b>[ШОРТ]</b> / <b>[ЖДАТЬ]</b>
+    Дай сигнал с учетом ATR для стоп-лосса.
+    Формат:
+    <b>🗞 ФОН:</b> ...
+    <b>⚙️ ТЕХНИКА:</b> ...
+    <b>🎯 ВЕРДИКТ:</b> [ЛОНГ]/[ШОРТ]/[ЖДАТЬ]
     """
 
     try:
-        response = await asyncio.to_thread(model.generate_content, prompt)
-        text = response.text
-
-        text = text.replace("```html", "").replace("```", "").replace("**", "")
-        text = text.replace("<p>", "").replace("</p>", "\n").replace("<br>", "\n")
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        return text.strip()
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.3
+        )
+        return response.choices[0].message.content
     except Exception as e:
-        return f"⚠️ Ошибка нейросети: {e}"
+        return f"⚠️ Ошибка Groq: {e}"
