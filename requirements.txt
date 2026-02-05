@@ -1,0 +1,5 @@
+aiogram
+yfinance
+ta
+pandas
+google-generativeai
